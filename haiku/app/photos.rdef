@@ -1,0 +1,17 @@
+/*
+ * retifs Photos for Haiku: the app's resources.
+ */
+
+resource app_signature "application/x-vnd.retifs-photos";
+
+resource app_flags B_SINGLE_LAUNCH;
+
+resource app_version {
+	major  = 0,
+	middle = 0,
+	minor  = 1,
+	variety = B_APPV_DEVELOPMENT,
+	internal = 0,
+	short_info = "Photos",
+	long_info = "retifs Photos: every picture in your libraries"
+};

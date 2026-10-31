@@ -1,0 +1,15 @@
+[package]
+name = "retifs-photos-capi"
+description = "retifs Photos for Haiku: the shared core to C (the BeAPI front end), JSON and image bytes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "retifs_photos"
+crate-type = ["cdylib"]
+
+[dependencies]
+retifs-photos-core = { path = "../../core" }
+serde_json = "1"

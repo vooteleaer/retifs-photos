@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "gtk"]
+members = ["core", "gtk", "haiku/capi"]
 # The GTK front end builds only where GTK 4 and libadwaita are installed (Linux).
 default-members = ["core"]
 
