@@ -55,8 +55,13 @@ struct App {
     photos: RefCell<Vec<Photo>>,
     albums: RefCell<Vec<Album>>,
     people: RefCell<Vec<Person>>,
-    /// Thumbnails as they are (the viewer, until the preview comes).
+    /// Thumbnails scaled down (the viewer, until the preview comes; avatars):
+    /// never a whole camera image (~48 MB decoded each).
     textures: RefCell<HashMap<String, gdk::Texture>>,
+    /// The grid's scroller: thumbnails are fetched for what's shown in it.
+    scroller: gtk::ScrolledWindow,
+    /// A batch of thumbnails is being fetched.
+    fetching: std::cell::Cell<bool>,
     /// Thumbnails cut square to the grid's size.
     squares: RefCell<HashMap<String, gdk::Texture>>,
     pictures: RefCell<HashMap<String, gtk::Picture>>,
@@ -85,7 +90,8 @@ fn build(gapp: &adw::Application) {
     let grid_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_start(12).margin_end(12).margin_bottom(12).build();
     let grid_view = adw::ToolbarView::new();
     grid_view.add_top_bar(&adw::HeaderBar::new());
-    grid_view.set_content(Some(&gtk::ScrolledWindow::builder().child(&grid_box).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build()));
+    let scroller = gtk::ScrolledWindow::builder().child(&grid_box).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
+    grid_view.set_content(Some(&scroller));
     let grid_page = adw::NavigationPage::builder().title("Photos").tag("grid").child(&grid_view).build();
     let nav = adw::NavigationView::new();
     nav.add(&grid_page);
@@ -108,11 +114,18 @@ fn build(gapp: &adw::Application) {
         albums: RefCell::new(Vec::new()),
         people: RefCell::new(Vec::new()),
         textures: RefCell::new(HashMap::new()),
+        scroller: scroller.clone(),
+        fetching: std::cell::Cell::new(false),
         squares: RefCell::new(HashMap::new()),
         pictures: RefCell::new(HashMap::new()),
         counts: RefCell::new(HashMap::new()),
         status,
     });
+    {
+        // Scrolled: the thumbnails of what comes into view.
+        let me2 = me.clone();
+        scroller.vadjustment().connect_value_changed(move |_| want_thumbs(&me2));
+    }
     {
         let me = me.clone();
         side.connect_row_activated(move |_, row| {
@@ -321,51 +334,103 @@ fn show_grid(me: &Rc<App>) {
         flow.as_ref().unwrap().append(&frame);
         me.pictures.borrow_mut().insert(p.id.clone(), pic);
     }
-    load_thumbs(me, photos);
+    want_thumbs(me);
+    // Once laid out (the squares' places known), again.
+    let me2 = me.clone();
+    glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || want_thumbs(&me2));
 }
 
-/// Fetches the thumbnails the grid lacks, a batch at a time.
-fn load_thumbs(me: &Rc<App>, photos: Vec<Photo>) {
-    let missing: Vec<Photo> = photos.into_iter().filter(|p| !me.squares.borrow().contains_key(&p.id)).collect();
-    if missing.is_empty() {
+/// The most squares kept (~90 KB each): a library may have thousands of
+/// photos; those off screen go first.
+const MAX_SQUARES: usize = 1000;
+
+/// The photos shown now in the grid (and a screen below it).
+fn on_screen(me: &Rc<App>) -> Vec<String> {
+    let height = me.scroller.height() as f32;
+    let mut ids: Vec<(f32, String)> = me
+        .pictures
+        .borrow()
+        .iter()
+        .filter_map(|(id, pic)| {
+            let b = pic.compute_bounds(&me.scroller)?;
+            (b.y() + b.height() >= 0.0 && b.y() <= height * 2.0).then(|| (b.y(), id.clone()))
+        })
+        .collect();
+    ids.sort_by(|a, b| a.0.total_cmp(&b.0));
+    ids.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Fetches the thumbnails of what's on screen, a batch at a time; scrolled
+/// past, they aren't fetched. Called on drawing the grid and on scrolling.
+fn want_thumbs(me: &Rc<App>) {
+    if me.fetching.get() {
         return;
     }
-    let (batch, rest): (Vec<Photo>, Vec<Photo>) = {
-        let n = missing.len().min(24);
-        let mut m = missing;
-        let rest = m.split_off(n);
-        (m, rest)
-    };
+    let shown = on_screen(me);
+    let photos = me.photos.borrow();
+    let batch: Vec<Photo> = shown
+        .iter()
+        .filter(|id| !me.squares.borrow().contains_key(*id))
+        .filter_map(|id| photos.iter().find(|p| p.id == *id).cloned())
+        .take(12)
+        .collect();
+    drop(photos);
+    if batch.is_empty() {
+        return;
+    }
+    me.fetching.set(true);
     let me2 = me.clone();
     bg(&me.lib, move |l| batch.iter().map(|p| (p.id.clone(), l.image(p, "thumb", MAX_THUMB))).collect::<Vec<_>>(), move |got| {
+        me2.fetching.set(false);
         for (id, bytes) in got {
-            let Some(bytes) = bytes else { continue };
-            let Some(t) = gdk::Texture::from_bytes(&glib::Bytes::from(&bytes)).ok() else { continue };
-            let sq = square(&bytes).unwrap_or_else(|| t.clone());
+            let Some((sq, small)) = bytes.as_deref().and_then(scaled) else {
+                // Unreadable: an empty square, not asked for again.
+                me2.squares.borrow_mut().insert(id, gdk::Texture::for_pixbuf(&gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 1, 1).expect("a pixel")));
+                continue;
+            };
             if let Some(pic) = me2.pictures.borrow().get(&id) {
                 pic.set_paintable(Some(&sq));
             }
-            me2.textures.borrow_mut().insert(id.clone(), t);
+            me2.textures.borrow_mut().insert(id.clone(), small);
             me2.squares.borrow_mut().insert(id, sq);
         }
+        trim(&me2);
         // People's avatars may be among them.
         if me2.people.borrow().iter().any(|p| p.photo.as_ref().is_some_and(|id| me2.textures.borrow().contains_key(id))) {
             show_sidebar(&me2);
         }
-        load_thumbs(&me2, rest);
+        want_thumbs(&me2);
     });
 }
 
-/// A thumbnail cut to a centred square and scaled to the grid's cell, so
-/// the cells have its size. (Sharper on HiDPI screens: by the scale, later.)
-fn square(bytes: &[u8]) -> Option<gdk::Texture> {
+/// Keeps at most MAX_SQUARES, dropping those off screen.
+fn trim(me: &Rc<App>) {
+    if me.squares.borrow().len() <= MAX_SQUARES {
+        return;
+    }
+    let keep: std::collections::HashSet<String> = on_screen(me).into_iter().collect();
+    let drop: Vec<String> = me.squares.borrow().keys().filter(|id| !keep.contains(*id)).take(me.squares.borrow().len() - MAX_SQUARES).cloned().collect();
+    for id in drop {
+        me.squares.borrow_mut().remove(&id);
+        me.textures.borrow_mut().remove(&id);
+        if let Some(pic) = me.pictures.borrow().get(&id) {
+            pic.set_paintable(None::<&gdk::Paintable>);
+        }
+    }
+}
+
+/// A thumbnail cut to a centred square of the grid's cell, and scaled to
+/// 320 px at most (the viewer's until the preview comes, avatars): the
+/// whole image isn't kept.
+#[allow(deprecated)]
+fn scaled(bytes: &[u8]) -> Option<(gdk::Texture, gdk::Texture)> {
     let pb = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(bytes.to_vec())).ok()?;
     let side = pb.width().min(pb.height());
     let cut = pb.new_subpixbuf((pb.width() - side) / 2, (pb.height() - side) / 2, side, side);
-    let px = CELL;
-    let small = cut.scale_simple(px, px, gtk::gdk_pixbuf::InterpType::Bilinear)?;
-    #[allow(deprecated)]
-    Some(gdk::Texture::for_pixbuf(&small))
+    let square = cut.scale_simple(CELL, CELL, gtk::gdk_pixbuf::InterpType::Bilinear)?;
+    let f = (320.0 / pb.width().max(pb.height()) as f64).min(1.0);
+    let small = pb.scale_simple(((pb.width() as f64 * f) as i32).max(1), ((pb.height() as f64 * f) as i32).max(1), gtk::gdk_pixbuf::InterpType::Bilinear)?;
+    Some((gdk::Texture::for_pixbuf(&square), gdk::Texture::for_pixbuf(&small)))
 }
 
 /// The viewer for the `i`th photo of the current view.
