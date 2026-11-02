@@ -35,7 +35,10 @@
 
 #include <Json.h>
 
+#include <Screen.h>
+
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <stdlib.h>
 #include <string>
@@ -53,10 +56,12 @@ static const uint64 kMaxPreview = 32 << 20;
 enum {
 	kCall = 'call',
 	kAnswer = 'answ',
-	kImage = 'imag',		// an image the worker fetched ("id", "role", "bytes")
+	kImage = 'imag',		// an image the worker fetched and scaled ("id", "role",
+							// "bitmap", and for a thumb "square")
 	kCheck = 'chck',
 	kView = 'view',			// the sidebar's choice changed
 	kOpen = 'open',			// the grid: open photo "index"
+	kNeed = 'need',			// the grid: the squares shown now and missing ("id"…)
 	kChanged = 'chgd',		// the viewer changed something: reload
 	kReloaded = 'rldd',		// to the viewer: the load is new, ask again
 	kFavorite = 'favr',
@@ -143,28 +148,78 @@ MonthName(const BString& ym)
 }
 
 
-/*!	A copy of the centre square of `full`, `side` pixels wide. */
+/*! An image's bytes (JPEG, PNG…) as a bitmap, by the Translation Kit. */
 static BBitmap*
-Square(BBitmap* full, float side)
+Decode(const void* data, size_t length)
 {
-	BRect b = full->Bounds();
-	float edge = b.Width() < b.Height() ? b.Width() : b.Height();
-	BRect from(0, 0, edge, edge);
-	from.OffsetTo((b.Width() - edge) / 2, (b.Height() - edge) / 2);
-	// RGB, no alpha: drawing into an RGBA bitmap leaves its alpha at zero,
-	// and the square would then be drawn transparent.
-	BBitmap* out = new BBitmap(BRect(0, 0, side - 1, side - 1), B_RGB32, true);
-	BView* view = new BView(out->Bounds(), "square", B_FOLLOW_NONE, 0);
-	out->AddChild(view);
-	if (out->Lock()) {
-		view->DrawBitmap(full, from, out->Bounds(), B_FILTER_BITMAP_BILINEAR);
-		view->Sync();
-		out->Unlock();
+	if (data == NULL || length == 0)
+		return NULL;
+	BMemoryIO io(data, length);
+	BBitmap* bitmap = BTranslationUtils::GetBitmap(&io);
+	if (bitmap == NULL || !bitmap->IsValid()) {
+		delete bitmap;
+		return NULL;
 	}
-	out->RemoveChild(view);
-	delete view;
+	if (bitmap->ColorSpace() != B_RGBA32 && bitmap->ColorSpace() != B_RGB32) {
+		BBitmap* rgba = new BBitmap(bitmap->Bounds(), B_RGBA32);
+		rgba->ImportBits(bitmap);
+		delete bitmap;
+		bitmap = rgba;
+	}
+	return bitmap;
+}
+
+
+/*! `source` (or its middle square, if `square`) scaled down to fit
+	width×height, each pixel the average of those it covers. */
+static BBitmap*
+Scaled(const BBitmap* source, int width, int height, bool square)
+{
+	int sw = source->Bounds().IntegerWidth() + 1;
+	int sh = source->Bounds().IntegerHeight() + 1;
+	int sx0 = 0, sy0 = 0;
+	if (square) {
+		int side = std::min(sw, sh);
+		sx0 = (sw - side) / 2;
+		sy0 = (sh - side) / 2;
+		sw = sh = side;
+	}
+	double scale = std::min(1.0, std::min((double)width / sw, (double)height / sh));
+	int dw = std::max(1, (int)(sw * scale)), dh = std::max(1, (int)(sh * scale));
+	BBitmap* out = new BBitmap(BRect(0, 0, dw - 1, dh - 1), B_RGBA32);
+	const uint8* in = (const uint8*)source->Bits();
+	int inRow = source->BytesPerRow();
+	bool alpha = source->ColorSpace() == B_RGBA32;
+	uint8* to = (uint8*)out->Bits();
+	int outRow = out->BytesPerRow();
+	for (int y = 0; y < dh; y++) {
+		int ya = sy0 + y * sh / dh, yb = std::max(ya + 1, sy0 + (y + 1) * sh / dh);
+		for (int x = 0; x < dw; x++) {
+			int xa = sx0 + x * sw / dw, xb = std::max(xa + 1, sx0 + (x + 1) * sw / dw);
+			uint32 sum[4] = { 0, 0, 0, 0 }, n = 0;
+			for (int yy = ya; yy < yb; yy++) {
+				const uint8* p = in + yy * inRow + xa * 4;
+				for (int xx = xa; xx < xb; xx++, p += 4, n++) {
+					sum[0] += p[0];
+					sum[1] += p[1];
+					sum[2] += p[2];
+					sum[3] += alpha ? p[3] : 255;
+				}
+			}
+			uint8* q = to + y * outRow + x * 4;
+			for (int c = 0; c < 4; c++)
+				q[c] = sum[c] / n;
+		}
+	}
 	return out;
 }
+
+
+/*! The longest side a viewer shows (a preview may be a whole camera image). */
+static const int kViewerSide = 2560;
+/*! The most squares kept (~90 KB each): those not drawn longest go first,
+	a library may have thousands of photos. */
+static const size_t kMaxSquares = 1000;
 
 
 // #pragma mark - Worker
@@ -194,11 +249,25 @@ public:
 			BMessage image(kImage);
 			image.AddString("id", a);
 			image.AddString("role", op);
-			if (bytes != NULL) {
-				image.AddData("bytes", B_RAW_TYPE, bytes, len);
+			// Decoded and scaled down here, the whole image dropped at once:
+			// a camera's photo is ~48 MB decoded, and app_server's memory for
+			// bitmaps ran out with a library's worth of them kept.
+			BBitmap* full = Decode(bytes, len);
+			if (bytes != NULL)
 				rp_free_bytes(bytes, len);
+			BBitmap* small = NULL;
+			BBitmap* square = NULL;
+			if (full != NULL && op == "thumb")
+				square = Scaled(full, (int)kCell, (int)kCell, true);
+			else if (full != NULL)
+				small = Scaled(full, kViewerSide, kViewerSide, false);
+			delete full;
+			image.AddPointer("bitmap", small);
+			image.AddPointer("square", square);
+			if (replyTo.SendMessage(&image) != B_OK) {
+				delete small;
+				delete square;
 			}
-			replyTo.SendMessage(&image);
 			return;
 		}
 
@@ -322,10 +391,13 @@ struct Shown {
 /*!	The photos of the current view as square thumbnails, by month. */
 class PhotoGrid : public BView {
 public:
-	PhotoGrid(std::map<std::string, BBitmap*>& squares)
+	PhotoGrid(std::map<std::string, BBitmap*>& squares,
+		std::map<std::string, uint64>& used)
 		:
 		BView("grid", B_WILL_DRAW | B_FRAME_EVENTS),
-		fSquares(squares)
+		fSquares(squares),
+		fUsed(used),
+		fDraws(0)
 	{
 		SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
 	}
@@ -353,12 +425,22 @@ public:
 		for (size_t i = 0; i < fHeads.size(); i++)
 			DrawString(MonthName(fHeads[i].second), fHeads[i].first);
 		SetFont(be_plain_font);
+		fDraws++;
+		BRect visible = Bounds();
+		BMessage need(kNeed);
 		for (size_t i = 0; i < fPhotos.size(); i++) {
 			BRect r = fCells[i];
+			std::string id = fPhotos[i].id.String();
+			// Shown now, or just below: asked for, nearest first.
+			BRect soon = visible;
+			soon.bottom += visible.Height();
+			if (r.Intersects(soon) && fSquares.count(id) == 0)
+				need.AddString("id", id.c_str());
 			if (!r.Intersects(update))
 				continue;
-			auto found = fSquares.find(fPhotos[i].id.String());
+			auto found = fSquares.find(id);
 			if (found != fSquares.end()) {
+				fUsed[id] = fDraws;
 				DrawBitmap(found->second, r);
 			} else {
 				SetHighColor(200, 200, 200);
@@ -369,6 +451,8 @@ public:
 				DrawString("★", BPoint(r.right - 16, r.top + 16));
 			}
 		}
+		if (need.HasString("id"))
+			Window()->PostMessage(&need);
 	}
 
 	void MouseDown(BPoint where)
@@ -425,6 +509,8 @@ public:
 
 private:
 	std::map<std::string, BBitmap*>& fSquares;
+	std::map<std::string, uint64>& fUsed;
+	uint64 fDraws;
 	std::vector<Shown> fPhotos;
 	std::vector<BRect> fCells;
 	std::vector<std::pair<BPoint, BString>> fHeads;
@@ -477,6 +563,19 @@ private:
 class PhotosWindow;
 
 
+/*! Puts `window` over the whole screen, its tab and border just outside. */
+static void
+FillScreen(BWindow* window)
+{
+	BRect screen = BScreen(window).Frame();
+	BRect frame = window->Frame(), outer = window->DecoratorFrame();
+	float left = frame.left - outer.left, top = frame.top - outer.top;
+	float right = outer.right - frame.right, bottom = outer.bottom - frame.bottom;
+	window->MoveTo(screen.left + left, screen.top + top);
+	window->ResizeTo(screen.Width() - left - right, screen.Height() - top - bottom);
+}
+
+
 /*! One photo: its picture, what's known of it, favourite, people, albums. */
 class ViewerWindow : public BWindow {
 public:
@@ -492,6 +591,7 @@ public:
 		fImage = new ImageView();
 		if (thumb != NULL)
 			fImage->SetBitmap(new BBitmap(thumb));
+		FillScreen(this);
 		fTitle = new BStringView("title", "");
 		BFont bold(be_bold_font);
 		bold.SetSize(bold.Size() * 1.2);
@@ -545,14 +645,13 @@ public:
 				break;
 			case kImage:
 			{
-				const void* data;
-				ssize_t size;
-				if (message->FindData("bytes", B_RAW_TYPE, &data, &size) == B_OK) {
-					BMemoryIO io(data, size);
-					BBitmap* bitmap = BTranslationUtils::GetBitmap(&io);
-					if (bitmap != NULL)
-						fImage->SetBitmap(bitmap);
-				}
+				BBitmap* bitmap = NULL;
+				BBitmap* square = NULL;
+				message->FindPointer("bitmap", (void**)&bitmap);
+				message->FindPointer("square", (void**)&square);
+				delete square;
+				if (bitmap != NULL)
+					fImage->SetBitmap(bitmap);
 				break;
 			}
 			case kReloaded:
@@ -731,7 +830,7 @@ public:
 		big.SetSize(big.Size() * 1.3);
 		fTitle->SetFont(&big);
 		fStatus = new BStringView("status", "");
-		fGrid = new PhotoGrid(fSquares);
+		fGrid = new PhotoGrid(fSquares, fUsed);
 
 		BScrollView* side = new BScrollView("ss", fSide, 0, false, true);
 		side->SetExplicitPreferredSize(BSize(240, B_SIZE_UNSET));
@@ -756,8 +855,6 @@ public:
 		delete fRunner;
 		for (auto& s : fSquares)
 			delete s.second;
-		for (auto& t : fThumbs)
-			delete t.second;
 	}
 
 	void MessageReceived(BMessage* message)
@@ -786,18 +883,30 @@ public:
 			case kImage:
 			{
 				BString id = message->GetString("id", "");
-				const void* data;
-				ssize_t size;
+				BBitmap* small = NULL;
+				BBitmap* square = NULL;
+				message->FindPointer("bitmap", (void**)&small);
+				message->FindPointer("square", (void**)&square);
+				delete small;
 				fAsked.erase(id.String());
-				if (message->FindData("bytes", B_RAW_TYPE, &data, &size) != B_OK)
-					break;
-				BMemoryIO io(data, size);
-				BBitmap* full = BTranslationUtils::GetBitmap(&io);
-				if (full == NULL)
-					break;
-				fThumbs[id.String()] = full;
-				fSquares[id.String()] = Square(full, kCell);
-				fGrid->Refresh();
+				fInFlight = std::max(0, fInFlight - 1);
+				if (square != NULL) {
+					delete fSquares[id.String()];
+					fSquares[id.String()] = square;
+					_Trim();
+					fGrid->Refresh();
+				}
+				_Pump();
+				break;
+			}
+			case kNeed:
+			{
+				// What's shown now replaces what was wanted before.
+				fWanted.clear();
+				const char* id;
+				for (int32 i = 0; message->FindString("id", i, &id) == B_OK; i++)
+					fWanted.push_back(id);
+				_Pump();
 				break;
 			}
 			case kCheck:
@@ -945,13 +1054,40 @@ private:
 		fStatus->SetText(status);
 		fGrid->SetPhotos(shown);
 
-		// The thumbnails missing, one by one in the background.
-		for (size_t i = 0; i < shown.size(); i++) {
-			std::string id = shown[i].id.String();
-			if (fSquares.count(id) == 0 && fAsked.count(id) == 0) {
-				fAsked[id] = true;
-				Call(this, "thumb", id.c_str());
+		// The thumbnails: asked for as the grid shows them (kNeed).
+	}
+
+	/*! Asks for the wanted squares, two at a time (each a fetch, maybe from
+		another node): scrolled past, they aren't asked for. */
+	void _Pump()
+	{
+		while (fInFlight < 2 && !fWanted.empty()) {
+			std::string id = fWanted.front();
+			fWanted.pop_front();
+			if (fSquares.count(id) != 0 || fAsked.count(id) != 0)
+				continue;
+			fAsked[id] = true;
+			fInFlight++;
+			Call(this, "thumb", id.c_str());
+		}
+	}
+
+	/*! Keeps at most kMaxSquares, dropping those drawn longest ago. */
+	void _Trim()
+	{
+		while (fSquares.size() > kMaxSquares) {
+			auto oldest = fSquares.begin();
+			uint64 when = UINT64_MAX;
+			for (auto it = fSquares.begin(); it != fSquares.end(); ++it) {
+				uint64 used = fUsed.count(it->first) ? fUsed[it->first] : 0;
+				if (used < when) {
+					when = used;
+					oldest = it;
+				}
 			}
+			fUsed.erase(oldest->first);
+			delete oldest->second;
+			fSquares.erase(oldest);
 		}
 	}
 
@@ -959,10 +1095,10 @@ private:
 	{
 		if (i < 0 || i >= (int32)fShown.size())
 			return;
-		auto thumb = fThumbs.find(fShown[i].id.String());
+		auto thumb = fSquares.find(fShown[i].id.String());
 		ViewerWindow* viewer = new ViewerWindow(BMessenger(this), fLoad,
 			fShown[i].id, i > 0, i + 1 < (int32)fShown.size(),
-			thumb != fThumbs.end() ? thumb->second : NULL);
+			thumb != fSquares.end() ? thumb->second : NULL);
 		fViewer = BMessenger(viewer);
 		viewer->Show();
 	}
@@ -973,7 +1109,9 @@ private:
 	BStringView* fStatus;
 	PhotoGrid* fGrid;
 	std::map<std::string, BBitmap*> fSquares;
-	std::map<std::string, BBitmap*> fThumbs;
+	std::map<std::string, uint64> fUsed;
+	std::deque<std::string> fWanted;
+	int32 fInFlight = 0;
 	std::map<std::string, bool> fAsked;
 	std::vector<Shown> fShown;
 	BMessage fLoad;
