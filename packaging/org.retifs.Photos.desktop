@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Photos
+GenericName=Photo album
+Comment=Your photos in retifs: by month, albums, people, favourites
+Exec=retifs-photos
+Icon=org.retifs.Photos
+Terminal=false
+Categories=Graphics;Photography;
+Keywords=photos;pictures;album;retifs;
+StartupNotify=true
