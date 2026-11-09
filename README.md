@@ -21,6 +21,10 @@ retifsd's sockets are in the retifs app's files, so the app asks the retifs app 
 
 Build: `powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 [-Abis arm64-v8a]` (NDK 27, JDK 17, retifs next to this repository).
 
+## Windows
+
+`windows/` is the Windows front end (`retifs-photos.exe`, plain Win32 controls; the grid and the viewer drawn with Direct2D, pictures decoded with WIC): the libraries on the left (each ticked or not, remembered), the timeline by month, albums (open one to see its photos and move it to another library), select with click, Ctrl and Shift (Ctrl+A all) to star photos or add them to albums, a viewer (Enter or double-click; arrows, wheel or double-click to zoom, the original read once zoomed in). Build on Windows: `cargo build --release -p retifs-photos-win`. For tests: `RETIFS_PHOTOS_OFFSCREEN=1` draws it off screen without taking the focus.
+
 ## License
 
 [MIT](LICENSE)
