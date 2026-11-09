@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Photos handed to other apps (Share): copies in the cache, removed on the next share. -->
+<paths><cache-path name="shared" path="shared/" /></paths>

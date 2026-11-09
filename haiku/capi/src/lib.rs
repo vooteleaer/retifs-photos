@@ -2,8 +2,9 @@
 //! end), JSON in and out, images as bytes. The same calls as the GTK front
 //! end makes.
 //!
-//! The last load (`rp_load`) is kept here, so the other calls name photos,
-//! albums and people by ID. Every returned string is the caller's to free
+//! The last load (`rp_load`) is kept here, so the other calls name photos
+//! and people by ID, and albums by their name in lower case (an album is a
+//! name on its photos, in any case). Every returned string is the caller's to free
 //! with `rp_free`, every image with `rp_free_bytes`. Calls block: the front
 //! end makes them off its window threads, one at a time.
 
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::sync::{Mutex, OnceLock};
 
-use retifs_photos_core::{Album, Library, ME, Person, Photo};
+use retifs_photos_core::{Album, Library, Person, Photo, albums_of};
 use serde_json::{Value, json};
 
 #[derive(Default)]
@@ -53,6 +54,11 @@ fn ids(list: Vec<(String, String)>) -> Vec<String> {
     list.into_iter().map(|(id, _)| id).collect()
 }
 
+/// A photo's albums by ID (the name in lower case).
+fn album_ids(p: &Photo) -> Vec<String> {
+    p.albums().iter().map(|n| n.to_lowercase()).collect()
+}
+
 /// Everything the window shows, read again: `{"libraries", "photos": [{"ns",
 /// "id", "title", "month", "favorite", "albums": [id], "people": [id]}]`
 /// (newest first), `"albums": [{"id", "name", "cover"}]`, `"people": [{"id",
@@ -67,24 +73,24 @@ pub extern "C" fn rp_load() -> *mut c_char {
         }
         Err(e) => (Vec::new(), Err(e)),
     };
-    let albums = lib.albums(&libraries);
     let people = lib.people(&libraries);
     let error = photos.as_ref().err().cloned();
     let photos = photos.unwrap_or_default();
+    let albums = albums_of(&photos);
     let v = json!({
         "libraries": libraries,
         "photos": photos.iter().map(|p| json!({
             "ns": p.ns, "id": p.id, "title": p.title(), "month": p.month(),
-            "favorite": p.favorite(), "albums": ids(p.albums()), "people": ids(p.people()),
+            "favorite": p.favorite(), "albums": album_ids(p), "people": ids(p.people()),
         })).collect::<Vec<_>>(),
-        "albums": albums.iter().map(|a| json!({ "id": a.id, "name": a.name, "cover": a.cover })).collect::<Vec<_>>(),
+        "albums": albums.iter().map(|a| json!({ "id": a.name.to_lowercase(), "name": a.name, "cover": a.cover.as_ref().map(|(_, id)| id) })).collect::<Vec<_>>(),
         "people": people.iter().map(|p| json!({ "id": p.id, "name": p.name, "photo": p.photo })).collect::<Vec<_>>(),
         "error": error,
     });
     let mut l = loaded();
     l.libraries = libraries;
     l.photos = photos.into_iter().map(|p| (p.id.clone(), p)).collect();
-    l.albums = albums.into_iter().map(|a| (a.id.clone(), a)).collect();
+    l.albums = albums.into_iter().map(|a| (a.name.to_lowercase(), a)).collect();
     l.people = people.into_iter().map(|p| (p.id.clone(), p)).collect();
     out(v)
 }
@@ -113,7 +119,7 @@ pub unsafe extern "C" fn rp_details(id: *const c_char) -> *mut c_char {
         "favorite": p.favorite(),
         "details": p.details(),
         "people": people,
-        "albums": ids(p.albums()),
+        "albums": album_ids(p),
     }))
 }
 
@@ -183,34 +189,21 @@ pub unsafe extern "C" fn rp_file(id: *const c_char, album: *const c_char, on: c_
         (l.photos.get(&id).cloned(), l.albums.get(&album).cloned())
     };
     match (photo, a) {
-        (Some(p), Some(a)) => done(library().file_in_album(&p, &a, on != 0)),
+        (Some(p), Some(a)) => done(library().file_in_album(&p, &a.name, on != 0)),
         _ => done(Err("no such photo or album".into())),
     }
 }
 
-/// A new album called `name`, with photo `with` in it as its cover ("" for
-/// none): in that photo's library, else the first other than `me`.
+/// A new album called `name`, with photo `with` in it (an album is there
+/// once a photo is in it).
 ///
 /// # Safety
 /// The strings are NUL-terminated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rp_new_album(name: *const c_char, with: *const c_char) -> *mut c_char {
     let (name, with) = unsafe { (arg(name), arg(with)) };
-    let (photo, ns) = {
-        let l = loaded();
-        let photo = l.photos.get(&with).cloned();
-        let ns = photo.as_ref().map(|p| p.ns.clone()).or_else(|| l.libraries.iter().find(|n| *n != ME).cloned()).unwrap_or_else(|| ME.into());
-        (photo, ns)
-    };
-    let lib = library();
-    done((|| {
-        let album = lib.new_album(&ns, name.trim())?;
-        if let Some(p) = &photo {
-            lib.file_in_album(p, &album, true)?;
-            lib.set_cover(&album, p)?;
-        }
-        Ok(())
-    })())
+    let photo = loaded().photos.get(&with).cloned();
+    done(photo.ok_or_else(|| "an album starts with a photo".to_string()).and_then(|p| library().file_in_album(&p, &name, true)))
 }
 
 /// A new contact `name` in the user's address book, tagged on photo `id`.

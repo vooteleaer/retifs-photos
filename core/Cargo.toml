@@ -8,4 +8,6 @@ publish.workspace = true
 
 [dependencies]
 libretifs = { path = "../../retifs/crates/libretifs" }
+# Describing a picture imported here, as the extractor would (ADR-0023, ADR-0026).
+retifs-extract = { path = "../../retifs/crates/retifs-extract" }
 tokio = { version = "1", features = ["rt"] }

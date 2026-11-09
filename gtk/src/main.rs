@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use retifs_photos_core::{Album, Library, Person, Photo};
+use retifs_photos_core::{albums_of, Album, Library, Person, Photo};
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id("org.retifs.Photos").build();
@@ -78,10 +78,7 @@ fn build(gapp: &adw::Application) {
     let side_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     side_box.append(&gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build());
     side_box.append(&status);
-    let new_album = gtk::Button::from_icon_name("list-add-symbolic");
-    new_album.set_tooltip_text(Some("New album"));
     let side_header = adw::HeaderBar::new();
-    side_header.pack_start(&new_album);
     let side_view = adw::ToolbarView::new();
     side_view.add_top_bar(&side_header);
     side_view.set_content(Some(&side_box));
@@ -137,10 +134,6 @@ fn build(gapp: &adw::Application) {
             }
         });
     }
-    {
-        let me = me.clone();
-        new_album.connect_clicked(move |_| ask_new_album(&me, None));
-    }
     reload(&me, true);
     {
         let me = me.clone();
@@ -171,7 +164,7 @@ fn reload(me: &Rc<App>, first: bool) {
             // No daemon: said, not shown as an empty library.
             Err(e) => (Vec::new(), Err(e)),
         };
-        let albums = l.albums(&libs);
+        let albums = photos.as_ref().map(|p| albums_of(p)).unwrap_or_default();
         let people = l.people(&libs);
         let counts = l.change_counts(&libs);
         (libs, photos, albums, people, counts)
@@ -225,8 +218,7 @@ fn show_sidebar(me: &Rc<App>) {
     add(me, line("starred-symbolic", &format!("Favorites  ·  {}", photos.iter().filter(|p| p.favorite()).count()), None), Some(View::Favorites));
     add(me, side_label("Albums", true), None);
     for a in me.albums.borrow().iter() {
-        let n = photos.iter().filter(|p| p.albums().iter().any(|(id, _)| *id == a.id)).count();
-        add(me, line("folder-pictures-symbolic", &format!("{}  ·  {n}", a.name), None), Some(View::Album(a.clone())));
+        add(me, line("folder-pictures-symbolic", &format!("{}  ·  {}", a.name, a.count), None), Some(View::Album(a.clone())));
     }
     add(me, side_label("People", true), None);
     for p in me.people.borrow().iter() {
@@ -268,7 +260,7 @@ fn shown(me: &Rc<App>) -> Vec<Photo> {
         .filter(|p| match &view {
             View::All => true,
             View::Favorites => p.favorite(),
-            View::Album(a) => p.albums().iter().any(|(id, _)| *id == a.id),
+            View::Album(a) => p.albums().iter().any(|n| n.eq_ignore_ascii_case(&a.name)),
             View::Person(person) => p.people().iter().any(|(id, _)| *id == person.id),
         })
         .cloned()
@@ -507,23 +499,23 @@ fn open_viewer(me: &Rc<App>, i: usize) {
     people.add(&pick);
     info.add(&people);
 
-    // Albums: in or out of each, a new one, this photo as a cover.
+    // Albums: in or out of each, or a new one.
     let albums = adw::PreferencesGroup::builder().title("Albums").build();
     let in_albums = p.albums();
     for a in me.albums.borrow().iter() {
-        let on = in_albums.iter().any(|(id, _)| *id == a.id);
+        let on = in_albums.iter().any(|n| n.eq_ignore_ascii_case(&a.name));
         let row = adw::SwitchRow::builder().title(glib::markup_escape_text(&a.name)).active(on).build();
-        let (me2, p2, a2) = (me.clone(), p.clone(), a.clone());
+        let (me2, p2, name) = (me.clone(), p.clone(), a.name.clone());
         row.connect_active_notify(move |s| {
-            let (on, me3, p3, a3) = (s.is_active(), me2.clone(), p2.clone(), a2.clone());
-            bg(&me2.lib, move |l| l.file_in_album(&p3, &a3, on), move |_| reload(&me3, false));
+            let (on, me3, p3, name) = (s.is_active(), me2.clone(), p2.clone(), name.clone());
+            bg(&me2.lib, move |l| l.file_in_album(&p3, &name, on), move |_| reload(&me3, false));
         });
         albums.add(&row);
     }
     let add_album = gtk::Button::builder().label("New album with this photo").css_classes(["flat"]).halign(gtk::Align::Start).build();
     {
         let (me2, p2) = (me.clone(), p.clone());
-        add_album.connect_clicked(move |_| ask_new_album(&me2, Some(p2.clone())));
+        add_album.connect_clicked(move |_| ask_new_album(&me2, &p2));
     }
     albums.add(&add_album);
     info.add(&albums);
@@ -560,12 +552,12 @@ fn reopen(me: &Rc<App>, id: &str) {
     let (me2, id) = (me.clone(), id.to_string());
     bg(&me.lib, |l| {
         let libs = l.libraries().unwrap_or_default();
-        (l.photos(&libs), l.albums(&libs), l.people(&libs))
-    }, move |(photos, albums, people)| {
+        (l.photos(&libs), l.people(&libs))
+    }, move |(photos, people)| {
         if let Ok(p) = photos {
+            *me2.albums.borrow_mut() = albums_of(&p);
             *me2.photos.borrow_mut() = p;
         }
-        *me2.albums.borrow_mut() = albums;
         *me2.people.borrow_mut() = people;
         show_sidebar(&me2);
         show_grid(&me2);
@@ -590,28 +582,17 @@ fn ask_text(me: &Rc<App>, heading: &str, body: &str, then: impl Fn(String) + 'st
     dialog.present();
 }
 
-/// A new album, in the library of `with` (the photo it starts with) or the first other than `me`.
-fn ask_new_album(me: &Rc<App>, with: Option<Photo>) {
-    let ns = with.as_ref().map(|p| p.ns.clone()).or_else(|| me.libraries.borrow().iter().find(|l| *l != "me").cloned()).unwrap_or_else(|| "me".into());
-    let me2 = me.clone();
-    ask_text(me, "New album", &format!("Albums are records in a library ({ns}): share one and its photos go with it."), move |name| {
-        let (me3, with, with_id) = (me2.clone(), with.clone(), with.as_ref().map(|p| p.id.clone()));
-        let ns = ns.clone();
-        bg(&me2.lib, move |l| {
-            let album = l.new_album(&ns, &name)?;
-            if let Some(p) = &with {
-                l.file_in_album(p, &album, true)?;
-                l.set_cover(&album, p)?;
-            }
-            Ok::<_, String>(())
-        }, move |r| {
+/// A new album, with photo `p` in it: an album is a name on its photos, in
+/// whichever libraries they are.
+fn ask_new_album(me: &Rc<App>, p: &Photo) {
+    let (me2, p2) = (me.clone(), p.clone());
+    ask_text(me, "New album", "An album is a name on its photos, in whichever libraries they are.", move |name| {
+        let (me3, p3, id) = (me2.clone(), p2.clone(), p2.id.clone());
+        bg(&me2.lib, move |l| l.file_in_album(&p3, &name, true), move |r| {
             if let Err(e) = r {
                 me3.status.set_text(&e);
             }
-            match &with_id {
-                Some(id) => reopen(&me3, id),
-                None => reload(&me3, false),
-            }
+            reopen(&me3, &id);
         });
     });
 }

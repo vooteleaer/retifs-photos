@@ -688,8 +688,8 @@ public:
 				break;
 			}
 			case kNewAlbum:
-				(new TextWindow("New album", "Albums are records in a library: "
-					"share one and its photos go with it.", BMessenger(this),
+				(new TextWindow("New album", "An album is a name on its photos, "
+					"in whichever libraries they are.", BMessenger(this),
 					"album"))->Show();
 				break;
 			case kText:
