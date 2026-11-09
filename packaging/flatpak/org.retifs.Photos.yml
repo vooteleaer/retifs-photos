@@ -1,0 +1,53 @@
+# org.retifs.Photos: the GTK app only. It uses whichever retifsd runs on this computer
+# (the retifs .deb's), through the shared store's socket. Build it with
+# build.sh next to this: it stages the sources this names (src/…) beside a
+# copy of this file.
+id: org.retifs.Photos
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: retifs-photos
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # The one store every retifs Flatpak and the host's retifsd share (its
+  # socket is there).
+  - --filesystem=xdg-data/retifs:create
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  # cargo fetches the crates (local bundles; no vendoring).
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/retifs-photos/cargo
+modules:
+  - name: retifs-photos
+    buildsystem: simple
+    sources:
+      - type: dir
+        path: src/retifs
+        dest: retifs
+      - type: dir
+        path: src/retifs-photos
+        dest: retifs-photos
+      # The store set (inside a Flatpak XDG_DATA_HOME is the app's own),
+      # then the program.
+      - type: script
+        dest-filename: wrapper
+        commands:
+          - ': "${RETIFS_STORE:=$HOME/.local/share/retifs}"'
+          - export RETIFS_STORE
+          - exec /app/libexec/retifs-photos "$@"
+    build-commands:
+      - cargo build --release --locked --manifest-path retifs-photos/Cargo.toml -p retifs-photos-gtk
+      - install -Dm755 retifs-photos/target/release/retifs-photos /app/libexec/retifs-photos
+      - install -Dm755 wrapper /app/bin/retifs-photos
+      - install -Dm644 retifs-photos/packaging/org.retifs.Photos.desktop -t /app/share/applications
+      - install -Dm644 retifs-photos/packaging/org.retifs.Photos.svg -t /app/share/icons/hicolor/scalable/apps
+      - install -Dm644 retifs-photos/packaging/flatpak/org.retifs.Photos.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 retifs-photos/LICENSE -t /app/share/licenses/org.retifs.Photos

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.retifs.Photos</id>
+  <name>Photos</name>
+  <summary>Your photos in retifs: by month, albums, people, favourites</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Photos from your retifs libraries: by month, in albums, by people, and favourites. It uses the retifs daemon of this computer (the retifs .deb),
+    whose store all retifs apps share. A prototype.</p>
+  </description>
+  <launchable type="desktop-id">org.retifs.Photos.desktop</launchable>
+  <url type="homepage">https://github.com/vooteleaer/retifs</url>
+  <content_rating type="oars-1.1"/>
+</component>
