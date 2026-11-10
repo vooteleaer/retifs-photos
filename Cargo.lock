@@ -771,7 +771,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libretifs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "rmp-serde",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-extract"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "imagesize",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-photos-capi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "retifs-photos-core",
  "serde_json",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-photos-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libretifs",
  "retifs-extract",
@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-photos-gtk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gtk4",
  "libadwaita",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-photos-jni"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jni",
  "libretifs",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-photos-win"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libretifs",
  "retifs-photos-core",
