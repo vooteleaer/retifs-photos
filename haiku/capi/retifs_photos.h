@@ -36,6 +36,10 @@ char* rp_new_person(const char* name, const char* tag_photo);
 
 /* {ns: count}: reload when these differ */
 char* rp_change_counts(void);
+/* Waits up to timeout_ms for a library of the last load to change:
+ * {"changed", "known": {ns: count}}. known is the last answer (NULL at
+ * first). Unlike the others it may run beside them: loop it on a thread. */
+char* rp_wait_change(const char* known, int32_t timeout_ms);
 
 void rp_free(char* s);
 

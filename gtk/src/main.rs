@@ -135,21 +135,33 @@ fn build(gapp: &adw::Application) {
         });
     }
     reload(&me, true);
-    {
-        let me = me.clone();
-        glib::timeout_add_seconds_local(3, move || {
-            let libs = me.libraries.borrow().clone();
-            let me2 = me.clone();
-            bg(&me.lib, move |l| l.change_counts(&libs), move |counts| {
-                if !counts.is_empty() && counts != *me2.counts.borrow() {
-                    reload(&me2, false);
-                }
-            });
-            glib::ControlFlow::Continue
-        });
-    }
+    watch_changes(&me, Arc::new(Library::new()), HashMap::new());
     snapshot_on_request(&window);
     window.present();
+}
+
+/// Reloads when a library shown changes: retifsd says so the moment it
+/// does (`Library::wait_change`), waited for on a `Library` of its own so
+/// nothing else is held up meanwhile.
+fn watch_changes(me: &Rc<App>, watcher: Arc<Library>, mut known: HashMap<String, u64>) {
+    // The libraries shown now, a newly shown one from the count of the last load.
+    let libs = me.libraries.borrow().clone();
+    known.retain(|ns, _| libs.contains(ns));
+    for (ns, n) in me.counts.borrow().iter() {
+        if libs.contains(ns) {
+            known.entry(ns.clone()).or_insert(*n);
+        }
+    }
+    let (me2, w) = (me.clone(), watcher.clone());
+    bg(&watcher, move |l| {
+        let changed = l.wait_change(&mut known, std::time::Duration::from_secs(60));
+        (changed, known)
+    }, move |(changed, known)| {
+        if changed {
+            reload(&me2, false);
+        }
+        watch_changes(&me2, w, known);
+    });
 }
 
 /// Everything again: libraries, photos, albums, people.

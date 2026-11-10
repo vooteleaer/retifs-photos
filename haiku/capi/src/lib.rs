@@ -6,7 +6,8 @@
 //! and people by ID, and albums by their name in lower case (an album is a
 //! name on its photos, in any case). Every returned string is the caller's to free
 //! with `rp_free`, every image with `rp_free_bytes`. Calls block: the front
-//! end makes them off its window threads, one at a time.
+//! end makes them off its window threads, one at a time (but for
+//! `rp_wait_change`, which waits beside them).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int};
@@ -18,6 +19,8 @@ use serde_json::{Value, json};
 #[derive(Default)]
 struct Loaded {
     libraries: Vec<String>,
+    /// Each library's change count as it was read.
+    counts: HashMap<String, u64>,
     photos: HashMap<String, Photo>,
     albums: HashMap<String, Album>,
     people: HashMap<String, Person>,
@@ -66,12 +69,14 @@ fn album_ids(p: &Photo) -> Vec<String> {
 #[unsafe(no_mangle)]
 pub extern "C" fn rp_load() -> *mut c_char {
     let lib = library();
-    let (libraries, photos) = match lib.libraries() {
+    let (libraries, counts, photos) = match lib.libraries() {
         Ok(libs) => {
+            // Counted first: a change while reading is another load, not missed.
+            let counts = lib.change_counts(&libs);
             let photos = lib.photos(&libs);
-            (libs, photos)
+            (libs, counts, photos)
         }
-        Err(e) => (Vec::new(), Err(e)),
+        Err(e) => (Vec::new(), HashMap::new(), Err(e)),
     };
     let people = lib.people(&libraries);
     let error = photos.as_ref().err().cloned();
@@ -89,6 +94,7 @@ pub extern "C" fn rp_load() -> *mut c_char {
     });
     let mut l = loaded();
     l.libraries = libraries;
+    l.counts = counts;
     l.photos = photos.into_iter().map(|p| (p.id.clone(), p)).collect();
     l.albums = albums.into_iter().map(|a| (a.name.to_lowercase(), a)).collect();
     l.people = people.into_iter().map(|p| (p.id.clone(), p)).collect();
@@ -230,6 +236,32 @@ pub unsafe extern "C" fn rp_new_person(name: *const c_char, id: *const c_char) -
 pub extern "C" fn rp_change_counts() -> *mut c_char {
     let libs = loaded().libraries.clone();
     out(json!(library().change_counts(&libs)))
+}
+
+/// Waits until a library of the last load changes, for at most
+/// `timeout_ms`: `{"changed", "known": {ns: count}}`. `known` is this call's
+/// last answer (or its "known"), or null at first; a library not in it
+/// counts from the last load. retifsd answers the moment a change comes.
+/// It waits with a `Library` of its own, so it may run beside the other
+/// calls: on a thread of its own, called again and again.
+///
+/// # Safety
+/// `known` is null or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rp_wait_change(known: *const c_char, timeout_ms: i32) -> *mut c_char {
+    static WATCHER: OnceLock<Library> = OnceLock::new();
+    let given: Value = serde_json::from_str(&unsafe { arg(known) }).unwrap_or(Value::Null);
+    let given = given.get("known").cloned().unwrap_or(given);
+    let mut known: HashMap<String, u64> = serde_json::from_value(given).unwrap_or_default();
+    {
+        let l = loaded();
+        known.retain(|ns, _| l.libraries.contains(ns));
+        for (ns, n) in &l.counts {
+            known.entry(ns.clone()).or_insert(*n);
+        }
+    }
+    let changed = WATCHER.get_or_init(Library::new).wait_change(&mut known, std::time::Duration::from_millis(timeout_ms.max(0) as u64));
+    out(json!({ "changed": changed, "known": known }))
 }
 
 /// Frees a string this library returned.

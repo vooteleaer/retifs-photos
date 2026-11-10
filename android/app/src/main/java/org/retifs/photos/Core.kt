@@ -35,6 +35,8 @@ object Core {
     external fun moveAlbum(libraries: String, name: String, to: String): String
     /** `{library: change count}`: reload when they differ. */
     external fun changeCounts(libraries: String): String
+    /** Waits (at most `timeoutMs`) until a library in `known` (`{library: count}`) changes: `{changed, known}`. */
+    external fun waitChange(known: String, timeoutMs: Long): String
 }
 
 suspend fun <T> core(work: () -> T): T = withContext(Dispatchers.IO) { work() }

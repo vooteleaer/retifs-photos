@@ -7,6 +7,7 @@
 //! through `org.retifs.photos.Retifs.connect()` (a descriptor, or -1).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::os::fd::FromRawFd;
 use std::sync::OnceLock;
 
@@ -241,4 +242,14 @@ pub extern "system" fn Java_org_retifs_photos_Core_changeCounts<'l>(mut env: JNI
     let libraries = list(&mut env, &libraries);
     let r = with(|l| json!(l.change_counts(&libraries)));
     out(&mut env, r.to_string())
+}
+
+/// Waits until a library in `known` (`{name: count}`) changes, for at most
+/// `timeout_ms`: `{"changed", "known"}`, the counts brought up to date. On
+/// this thread's own core, so the other calls aren't held up meanwhile.
+#[no_mangle]
+pub extern "system" fn Java_org_retifs_photos_Core_waitChange<'l>(mut env: JNIEnv<'l>, _: JClass<'l>, known: JString<'l>, timeout_ms: jlong) -> jstring {
+    let mut known: HashMap<String, u64> = serde_json::from_value(value(&mut env, &known)).unwrap_or_default();
+    let changed = with(|l| l.wait_change(&mut known, std::time::Duration::from_millis(timeout_ms.max(0) as u64)));
+    out(&mut env, json!({ "changed": changed, "known": known }).to_string())
 }

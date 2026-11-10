@@ -1,7 +1,8 @@
 //! The window: the libraries on the left (each shown or not), the bars and
-//! the picture area on the right, and the loader thread that reads the
-//! libraries and looks for changes every 15 s. The UI thread only draws:
-//! everything that can block runs on a thread and posts a message back.
+//! the picture area on the right, the loader thread that reads the
+//! libraries, and the watcher thread that wakes it the moment one changes.
+//! The UI thread only draws: everything that can block runs on a thread
+//! and posts a message back.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -129,6 +130,8 @@ static NOTE: Mutex<String> = Mutex::new(String::new());
 static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
 /// Wakes the loader to read everything again (after a change made here).
 static POKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// Each library's change count as the loader read it, for the watcher.
+static READ_COUNTS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 
 /// Runs `f` on the state, unless it's borrowed already (a message sent
 /// to us while we were busy): then nothing, and the caller tries later.
@@ -250,6 +253,7 @@ pub fn run() {
         }
         crate::images::start();
         std::thread::spawn(loader);
+        std::thread::spawn(watcher);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if msg.message == WM_KEYDOWN && shortcut(msg.wParam.0 as u16) {
@@ -575,8 +579,9 @@ fn sort(photos: &mut Vec<Photo>) {
 }
 
 /// Reads every library (all of them, so showing one again is at once),
-/// then every 15 s asks whether any changed (here or on another device)
-/// and reads them again if so, or at once when poked.
+/// then again when poked: by the watcher when one changed (here or on
+/// another device), or after a change made here. Without retifsd it asks
+/// again every 15 s; otherwise every 5 min, in case a change went unsaid.
 fn loader() {
     let lib = Library::new();
     let mut counts: HashMap<String, u64> = HashMap::new();
@@ -614,6 +619,7 @@ fn loader() {
                         sort(&mut all);
                     }
                     counts = lib.change_counts(&names);
+                    *READ_COUNTS.lock().unwrap() = Some(counts.clone());
                     ok = error.is_none();
                     publish(Loaded { libraries, photos: all, read, error, reading: None, done: true });
                 }
@@ -622,10 +628,29 @@ fn loader() {
         let (m, c) = &POKE;
         let mut poked = m.lock().unwrap();
         if !*poked {
-            poked = c.wait_timeout(poked, Duration::from_secs(15)).unwrap().0;
+            poked = c.wait_timeout(poked, Duration::from_secs(if ok { 300 } else { 15 })).unwrap().0;
         }
         force = *poked;
         *poked = false;
+    }
+}
+
+/// Pokes the loader the moment a library changes: retifsd says so
+/// (`Library::wait_change`), waited for on a `Library` of its own so the
+/// loader isn't held up meanwhile.
+fn watcher() {
+    let lib = Library::new();
+    let mut known: HashMap<String, u64> = HashMap::new();
+    loop {
+        // The libraries read last, a newly read one from the count of its read.
+        let read = READ_COUNTS.lock().unwrap().clone().unwrap_or_default();
+        known.retain(|ns, _| read.contains_key(ns));
+        for (ns, n) in read {
+            known.entry(ns).or_insert(n);
+        }
+        if lib.wait_change(&mut known, Duration::from_secs(60)) {
+            poke();
+        }
     }
 }
 

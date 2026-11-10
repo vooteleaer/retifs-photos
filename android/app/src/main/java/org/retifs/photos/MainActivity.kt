@@ -67,8 +67,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -147,8 +150,18 @@ class Gallery(val context: Context) {
         reading = null
     }
 
-    /** Whether a shown library changed since it was read. */
-    suspend fun changed(): Boolean = core { Core.changeCounts(JSONArray(shown).toString()) }.let { it != counts && counts.isNotEmpty() }
+    /**
+     * What to wait on (`{library: count}`): the libraries shown, with their
+     * counts in `known` (the last wait's), a newly shown one's from its read.
+     */
+    fun watching(known: JSONObject): String {
+        val read = JSONObject(counts.ifEmpty { "{}" })
+        val w = JSONObject()
+        for (ns in shown) {
+            if (known.has(ns)) w.put(ns, known.getLong(ns)) else if (read.has(ns)) w.put(ns, read.getLong(ns))
+        }
+        return w.toString()
+    }
 
     /** Changes a photo here at once, as the core was asked to. */
     fun update(changed: List<Photo>) {
@@ -190,11 +203,21 @@ fun App() {
     LaunchedEffect(Backup.backedUp, Backup.removals) {
         withContext(Dispatchers.IO) { Backup.removeRequest(context) }?.let { remove.launch(IntentSenderRequest.Builder(it).build()) }
     }
-    // Changes from elsewhere (another device, the backup): read again.
+    // Changes from elsewhere (another device, the backup): read again the
+    // moment retifsd says a shown library changed, while the app is on screen.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(Unit) {
-        while (true) {
-            delay(15_000)
-            if (gallery.reading == null && Retifs.problem == null && gallery.changed()) gallery.load()
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var known = JSONObject()
+            while (true) {
+                val answer = JSONObject(core { Core.waitChange(gallery.watching(known), 60_000) })
+                known = answer.optJSONObject("known") ?: JSONObject()
+                if (answer.optBoolean("changed") && Retifs.problem == null) {
+                    // A read under way may have passed the change already: after it, again.
+                    snapshotFlow { gallery.reading }.first { it == null }
+                    gallery.load()
+                }
+            }
         }
     }
 

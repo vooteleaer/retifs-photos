@@ -8,7 +8,8 @@
  * Everything comes from the shared Rust core through retifs_photos.h: JSON
  * read into BMessages with BJson, images as bytes decoded by the Translation
  * Kit. The core's calls block, so they run in a looper of their own (Worker),
- * which answers whoever asked.
+ * which answers whoever asked; a thread of its own (Watch) waits for the
+ * libraries to change.
  */
 
 #include <Application.h>
@@ -22,7 +23,7 @@
 #include <ListView.h>
 #include <MenuField.h>
 #include <MenuItem.h>
-#include <MessageRunner.h>
+#include <OS.h>
 #include <PopUpMenu.h>
 #include <ScrollBar.h>
 #include <ScrollView.h>
@@ -58,11 +59,10 @@ enum {
 	kAnswer = 'answ',
 	kImage = 'imag',		// an image the worker fetched and scaled ("id", "role",
 							// "bitmap", and for a thumb "square")
-	kCheck = 'chck',
 	kView = 'view',			// the sidebar's choice changed
 	kOpen = 'open',			// the grid: open photo "index"
 	kNeed = 'need',			// the grid: the squares shown now and missing ("id"…)
-	kChanged = 'chgd',		// the viewer changed something: reload
+	kChanged = 'chgd',		// the viewer or a library changed something: reload
 	kReloaded = 'rldd',		// to the viewer: the load is new, ask again
 	kFavorite = 'favr',
 	kUntag = 'untg',
@@ -271,12 +271,9 @@ public:
 			return;
 		}
 
-		BString raw;
 		BMessage result;
 		if (op == "load")
 			result = Take(rp_load());
-		else if (op == "counts")
-			result = Take(rp_change_counts(), &raw);
 		else if (op == "details")
 			result = Take(rp_details(a));
 		else if (op == "favorite")
@@ -294,7 +291,6 @@ public:
 		answer.AddString("op", op);
 		answer.AddString("id", a);
 		answer.AddMessage("result", &result);
-		answer.AddString("raw", raw);
 		replyTo.SendMessage(&answer);
 	}
 };
@@ -314,6 +310,29 @@ Call(BHandler* replyTo, const char* op, const char* a = "", const char* b = "",
 	call.AddInt32("n", n);
 	call.AddMessenger("reply_to", BMessenger(replyTo));
 	sWorker->PostMessage(&call);
+}
+
+
+// #pragma mark - Watch
+
+
+/*! Tells the window (data, a BMessenger it owns) the moment a library
+	changes, until the window is gone. rp_wait_change() waits on retifsd
+	with a Library of its own, so the worker isn't held up meanwhile. */
+static status_t
+Watch(void* data)
+{
+	BMessenger* window = (BMessenger*)data;
+	BString known;
+	while (window->IsValid()) {
+		BMessage answer = Take(rp_wait_change(
+			known.IsEmpty() ? NULL : known.String(), 60000), &known);
+		if (answer.GetBool("changed", false)
+			&& window->SendMessage(kChanged) != B_OK)
+			break;
+	}
+	delete window;
+	return B_OK;
 }
 
 
@@ -847,12 +866,17 @@ public:
 			.End();
 
 		Call(this, "load");
-		fRunner = new BMessageRunner(BMessenger(this), BMessage(kCheck), 3000000);
+		BMessenger* window = new BMessenger(this);
+		thread_id watch = spawn_thread(Watch, "photos watch", B_LOW_PRIORITY,
+			window);
+		if (watch >= 0)
+			resume_thread(watch);
+		else
+			delete window;
 	}
 
 	~PhotosWindow()
 	{
-		delete fRunner;
 		for (auto& s : fSquares)
 			delete s.second;
 	}
@@ -872,11 +896,6 @@ public:
 					BMessage reloaded(kReloaded);
 					reloaded.AddMessage("load", &fLoad);
 					fViewer.SendMessage(&reloaded);
-				} else if (op == "counts") {
-					BString raw = message->GetString("raw", "");
-					if (!fCounts.IsEmpty() && raw != fCounts)
-						Call(this, "load");
-					fCounts = raw;
 				}
 				break;
 			}
@@ -909,9 +928,6 @@ public:
 				_Pump();
 				break;
 			}
-			case kCheck:
-				Call(this, "counts");
-				break;
 			case kView:
 			{
 				int32 i = fSide->CurrentSelection();
@@ -1117,9 +1133,7 @@ private:
 	BMessage fLoad;
 	BString fViewKind;
 	BString fViewId;
-	BString fCounts;
 	BMessenger fViewer;
-	BMessageRunner* fRunner;
 };
 
 
