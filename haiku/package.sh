@@ -11,7 +11,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 APP=$HERE/build/Photos
 STAGE=$HERE/build/package
-VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)-4
+# The revision: the commit count (retifs docs/versioning.md), given as REVISION
+# where the sources are copied without .git.
+REVISION=${REVISION:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null)}
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1 | tr -d '\r')-${REVISION:?no REVISION (the commit count)}
+')-${REVISION:?no REVISION (the commit count)}
 ARCH=x86_64
 
 for f in Photos lib/libretifs_photos.so; do
