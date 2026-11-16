@@ -126,6 +126,7 @@ class PhotosApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Retifs.start(this)
+        CrashReports.install(this, Core::crashDir, Core::crashReport)
         Backup.schedule(this)
     }
 }

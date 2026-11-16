@@ -37,6 +37,10 @@ object Core {
     external fun changeCounts(libraries: String): String
     /** Waits (at most `timeoutMs`) until a library in `known` (`{library: count}`) changes: `{changed, known}`. */
     external fun waitChange(known: String, timeoutMs: Long): String
+    /** Where the core writes its own panics (a folder, and the header each report starts with). */
+    external fun crashDir(dir: String, header: String)
+    /** A crash or trouble report to retifs (`kind`, from `source`): true once it took it. */
+    external fun crashReport(kind: String, source: String, text: String): Boolean
 }
 
 suspend fun <T> core(work: () -> T): T = withContext(Dispatchers.IO) { work() }

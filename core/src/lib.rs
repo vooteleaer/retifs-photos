@@ -459,6 +459,13 @@ impl Library {
         self.call(&mut c, Request::RecordSet { ns: ns.into(), id: id.into(), attrs, unset, data: None }).map(|_| ())
     }
 
+    /// A crash or trouble report to retifs (ADR-0036), which keeps it for the
+    /// user's crash library.
+    pub fn crash_report(&self, kind: &str, source: &str, text: &str) -> Result<(), String> {
+        let mut c = self.client()?;
+        self.call(&mut c, Request::CrashReport { kind: kind.into(), source: source.into(), text: text.into() }).map(|_| ())
+    }
+
     pub fn set_favorite(&self, p: &Photo, on: bool) -> Result<(), String> {
         if on {
             self.set(&p.ns, &p.id, vec![("favorite".into(), AttrValue::Bool(true))], vec![])
